@@ -1,0 +1,69 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Safety Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // 3. Validation blueprints for Note Entity (The "Anti-Update-Gap")
+    function isValidNote(note) {
+      return note.keys().hasAll(['title', 'content', 'folder', 'userId', 'createdAt', 'updatedAt'])
+        && note.keys().size() <= 10
+        && note.title is string && note.title.size() <= 200
+        && note.content is string && note.content.size() <= 100000
+        && note.folder is string && note.folder.size() <= 50
+        && note.userId is string && note.userId == request.auth.uid
+        && (!note.keys().hasAll(['color']) || (note.color is string && note.color.size() <= 30))
+        && (!note.keys().hasAll(['isPinned']) || note.isPinned is bool)
+        && (!note.keys().hasAll(['isFavorite']) || note.isFavorite is bool)
+        && (!note.keys().hasAll(['tags']) || (note.tags is list && note.tags.size() <= 20));
+    }
+
+    // 4. Notes collection matching rules
+    match /notes/{noteId} {
+      
+      // Secure List Queries (The Query Enforcer)
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      
+      // Individual document get checks
+      allow get: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+
+      // Create validation
+      allow create: if isVerifiedUser()
+                    && isValidId(noteId)
+                    && isValidNote(request.resource.data)
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.createdAt == request.time
+                    && request.resource.data.updatedAt == request.time;
+                    
+      // Update validation
+      allow update: if isVerifiedUser()
+                    && isValidId(noteId)
+                    && isValidNote(request.resource.data)
+                    && resource.data.userId == request.auth.uid
+                    && request.resource.data.userId == resource.data.userId
+                    && request.resource.data.createdAt == resource.data.createdAt
+                    && request.resource.data.updatedAt == request.time;
+                    
+      // Delete validation
+      allow delete: if isVerifiedUser()
+                    && isValidId(noteId)
+                    && resource.data.userId == request.auth.uid;
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "Note": {
+      "title": "Note",
+      "description": "Represents a user's note that is synchronized across their devices",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "The title of the note. Max 100 chars."
+        },
+        "content": {
+          "type": "string",
+          "description": "The markdown context or raw text of the note."
+        },
+        "folder": {
+          "type": "string",
+          "description": "The folder/category string (e.g. personal, work, ideas, trash)."
+        },
+        "tags": {
+          "type": "array",
+          "description": "List of string tags for additional group filtering."
+        },
+        "isPinned": {
+          "type": "boolean",
+          "description": "Whether the note is pinned to the top of the list."
+        },
+        "isFavorite": {
+          "type": "boolean",
+          "description": "Whether the note is marked as a favorite."
+        },
+        "color": {
+          "type": "string",
+          "description": "Visual color category representation (e.g. slate, blue, amber, emerald, pink)."
+        },
+        "userId": {
+          "type": "string",
+          "description": "The authenticated Firebase User ID of the owner."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the note was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the note was last modified."
+        }
+      },
+      "required": ["title", "content", "folder", "userId", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "notes/{noteId}": {
+      "schema": "Note",
+      "description": "A collection storing individual user notes, where read and write rules are scoped strictly to the authenticating user (ownerId == auth.uid)."
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Cloud Note Sync",
+  "description": "Một ứng dụng ghi chú hiện đại giúp bạn ghi lại ý tưởng nhanh chóng và tự động đồng bộ hóa thời gian thực giữa các thiết bị thông qua nền tảng đám mây Firestore.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
