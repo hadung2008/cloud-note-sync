@@ -21,6 +21,7 @@ import { useNotes } from '../context/NotesContext';
 import { loginWithGoogle, logoutUser } from '../lib/firebase';
 import { motion } from 'motion/react';
 import { t } from '../lib/i18n';
+import InstallPWAButton from './InstallPWAButton';
 
 export default function Sidebar() {
   const {
@@ -352,7 +353,13 @@ export default function Sidebar() {
       </div>
 
       {/* Compact Settings & Status Footer */}
-      <div className="p-3 border-t-2 border-[var(--color-ink)] dark:border-[var(--color-ink-light)] flex items-center justify-between gap-2 bg-[var(--color-paper-dark)]/50 dark:bg-[var(--color-leather-dark)]/50">
+      <div className="border-t-2 border-[var(--color-ink)] dark:border-[var(--color-ink-light)] bg-[var(--color-paper-dark)]/50 dark:bg-[var(--color-leather-dark)]/50">
+        {/* PWA Install Banner (only shown if installable) */}
+        <div className="px-3 pt-3 empty:hidden">
+          <InstallPWAButton />
+        </div>
+
+        <div className="p-3 flex items-center justify-between gap-2">
         {/* Theme Toggle */}
         <button
           id="theme-toggle"
@@ -405,6 +412,7 @@ export default function Sidebar() {
           }`}>
             Auto Back-up Ready
           </div>
+        </div>
         </div>
       </div>
     </aside>
