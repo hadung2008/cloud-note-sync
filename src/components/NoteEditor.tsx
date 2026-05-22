@@ -19,6 +19,11 @@ import {
   Link as LinkIcon,
   Maximize2,
   ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Play,
+  Pause,
   Bold,
   Italic,
   Underline,
@@ -57,12 +62,23 @@ export default function NoteEditor() {
   const [imageUrlInput, setImageUrlInput] = useState<string>('');
   const [showUrlInput, setShowUrlInput] = useState<boolean>(false);
   const [isDragging, setIsDragging] = useState<boolean>(false);
-  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [isSlideshowPlaying, setIsSlideshowPlaying] = useState<boolean>(false);
+  const thumbnailStripRef = useRef<HTMLDivElement | null>(null);
+  const touchStartXRef = useRef<number | null>(null);
   const [showColorPicker, setShowColorPicker] = useState<boolean>(false);
   const [showChecklistSection, setShowChecklistSection] = useState<boolean>(true);
   const [showImagesSection, setShowImagesSection] = useState<boolean>(true);
   const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectionRef = useRef<{ start: number; end: number } | null>(null);
+  // Local buffer for the editor textarea + debounced commit to global state.
+  // Binding the textarea to a stable local value (instead of the global note
+  // updated on every keystroke) preserves the browser's native undo/redo
+  // stack so Ctrl+Z / Ctrl+Shift+Z work as expected for both typing and
+  // toolbar formatting actions (which use document.execCommand).
+  const [localContent, setLocalContent] = useState<string>('');
+  const localNoteIdRef = useRef<string | null>(null);
+  const contentCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Save selection before blur
   const saveSelection = () => {
@@ -92,6 +108,146 @@ export default function NoteEditor() {
   useEffect(() => {
     setActiveTab('edit');
   }, [activeNoteId]);
+
+  // Close lightbox & stop slideshow whenever switching notes
+  useEffect(() => {
+    setLightboxIndex(null);
+    setIsSlideshowPlaying(false);
+  }, [activeNoteId]);
+
+  // Sync local editor buffer when switching notes. Flush any pending debounced
+  // commit from the previous note first so no edits are lost.
+  useEffect(() => {
+    if (contentCommitTimerRef.current) {
+      clearTimeout(contentCommitTimerRef.current);
+      contentCommitTimerRef.current = null;
+    }
+    const prevId = localNoteIdRef.current;
+    if (prevId && prevId !== activeNoteId) {
+      const prevNote = notes.find((n) => n.id === prevId);
+      if (prevNote && prevNote.content !== localContent) {
+        updateNote(prevId, { content: localContent });
+      }
+    }
+    localNoteIdRef.current = activeNoteId;
+    setLocalContent(activeNote?.content || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeNoteId]);
+
+  // Keep local buffer in sync when the active note's content is updated from
+  // elsewhere (e.g. cloud sync) AND the user isn't actively editing.
+  useEffect(() => {
+    if (!activeNote) return;
+    if (contentCommitTimerRef.current) return; // user is typing, don't override
+    const remote = activeNote.content || '';
+    if (remote !== localContent) {
+      setLocalContent(remote);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeNote?.content]);
+
+  // Flush pending content commit on unmount
+  useEffect(() => {
+    return () => {
+      if (contentCommitTimerRef.current) {
+        clearTimeout(contentCommitTimerRef.current);
+        const id = localNoteIdRef.current;
+        if (id) {
+          updateNote(id, { content: localContent });
+        }
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const totalImages = activeNote?.images?.length ?? 0;
+
+  const goToImage = (next: number) => {
+    if (totalImages === 0) return;
+    const wrapped = ((next % totalImages) + totalImages) % totalImages;
+    setLightboxIndex(wrapped);
+  };
+  const goPrevImage = () => {
+    if (lightboxIndex === null) return;
+    goToImage(lightboxIndex - 1);
+  };
+  const goNextImage = () => {
+    if (lightboxIndex === null) return;
+    goToImage(lightboxIndex + 1);
+  };
+  const closeLightbox = () => {
+    setLightboxIndex(null);
+    setIsSlideshowPlaying(false);
+  };
+
+  // Keyboard navigation for lightbox
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeLightbox();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        goNextImage();
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        goPrevImage();
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        goToImage(0);
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        goToImage(totalImages - 1);
+      } else if (e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        setIsSlideshowPlaying((p) => !p);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightboxIndex, totalImages]);
+
+  // Auto-play slideshow ticker (3s per image)
+  useEffect(() => {
+    if (lightboxIndex === null || !isSlideshowPlaying || totalImages < 2) return;
+    const id = window.setInterval(() => {
+      setLightboxIndex((prev) => {
+        if (prev === null) return prev;
+        return ((prev + 1) % totalImages + totalImages) % totalImages;
+      });
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [lightboxIndex, isSlideshowPlaying, totalImages]);
+
+  // Auto-scroll thumbnail strip to keep current thumb in view
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+    const strip = thumbnailStripRef.current;
+    if (!strip) return;
+    const el = strip.querySelector<HTMLElement>(`[data-thumb-idx="${lightboxIndex}"]`);
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    }
+  }, [lightboxIndex]);
+
+  const handleDownloadCurrentImage = async () => {
+    if (lightboxIndex === null || !activeNote?.images) return;
+    const src = activeNote.images[lightboxIndex];
+    try {
+      const a = document.createElement('a');
+      a.href = src;
+      a.download = `image-${lightboxIndex + 1}`;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch {
+      window.open(src, '_blank', 'noopener,noreferrer');
+    }
+  };
 
   const handleAddSubNote = async (title: string) => {
     if (!activeNote || !title.trim()) return;
@@ -221,15 +377,31 @@ export default function NoteEditor() {
     );
   }
 
-  // Handle note body change
+  // Handle note body change.
+  // We update a local buffer immediately (so the textarea reflects input and
+  // the browser's native undo stack is preserved), and commit to the global
+  // store on a short debounce. This is what makes Ctrl+Z work reliably.
   const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    updateNote(activeNote.id, { content: e.target.value });
+    const v = e.target.value;
+    setLocalContent(v);
+    if (contentCommitTimerRef.current) {
+      clearTimeout(contentCommitTimerRef.current);
+    }
+    const noteId = activeNote.id;
+    contentCommitTimerRef.current = setTimeout(() => {
+      contentCommitTimerRef.current = null;
+      updateNote(noteId, { content: v });
+    }, 500);
   };
 
   /**
    * Apply formatting around the currently selected text in the textarea.
    * - 'wrap' mode wraps the selection with prefix/suffix (bold, italic, code...)
    * - 'line' mode prepends prefix at the beginning of each selected line (headings, lists, quotes)
+   *
+   * Uses document.execCommand('insertText', ...) so the browser's native undo
+   * stack (Ctrl+Z / Ctrl+Shift+Z) keeps each formatting action as a step.
+   * Falls back to direct updateNote() if execCommand is unavailable.
    */
   const applyFormat = (
     prefix: string,
@@ -249,7 +421,9 @@ export default function NoteEditor() {
     selectionRef.current = null; // Clear after use
     const selected = value.slice(start, end);
 
-    let newText: string;
+    let replaceFrom: number;
+    let replaceTo: number;
+    let insertText: string;
     let newStart: number;
     let newEnd: number;
 
@@ -263,19 +437,46 @@ export default function NoteEditor() {
         .split('\n')
         .map((line) => (line.length === 0 ? prefix : prefix + line))
         .join('\n');
-      newText = value.slice(0, lineStart) + transformed + value.slice(blockEnd);
+      replaceFrom = lineStart;
+      replaceTo = blockEnd;
+      insertText = transformed;
       newStart = lineStart;
       newEnd = lineStart + transformed.length;
     } else {
       const middle = selected.length > 0 ? selected : placeholder;
-      const inserted = prefix + middle + suffix;
-      newText = value.slice(0, start) + inserted + value.slice(end);
+      insertText = prefix + middle + suffix;
+      replaceFrom = start;
+      replaceTo = end;
       newStart = start + prefix.length;
       newEnd = newStart + middle.length;
     }
 
+    // Preferred path: use execCommand so the browser's native undo stack
+    // (Ctrl+Z / Ctrl+Shift+Z) records each formatting action as one step.
+    ta.focus();
+    ta.setSelectionRange(replaceFrom, replaceTo);
+    let inserted = false;
+    try {
+      inserted = document.execCommand('insertText', false, insertText);
+    } catch {
+      inserted = false;
+    }
+
+    if (inserted) {
+      // After insertText, place selection on the meaningful middle part
+      requestAnimationFrame(() => {
+        const el = editorTextareaRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(newStart, newEnd);
+      });
+      return;
+    }
+
+    // Fallback (older browsers): rewrite content via React state. This breaks
+    // native undo but at least keeps the formatting feature working.
+    const newText = value.slice(0, replaceFrom) + insertText + value.slice(replaceTo);
     updateNote(activeNote.id, { content: newText });
-    // Restore focus & selection after React re-renders
     requestAnimationFrame(() => {
       const el = editorTextareaRef.current;
       if (!el) return;
@@ -909,8 +1110,24 @@ export default function NoteEditor() {
                   </h4>
                   </button>
                   
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    {activeNote.images.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setLightboxIndex(0)}
+                        className={`text-[10px] font-mono font-bold flex items-center gap-1.5 px-2.5 py-1.5 border-2 transition-all shadow-[2px_2px_0px_#2C2A29] dark:shadow-[2px_2px_0px_#EBE5D0] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none cursor-pointer ${
+                          theme === 'dark'
+                            ? 'bg-transparent border-[var(--color-ink-light)] text-[var(--color-paper)] hover:bg-[var(--color-ink-light)] hover:text-zinc-900'
+                            : 'bg-transparent border-[var(--color-ink)] text-[var(--color-ink)] hover:bg-[var(--color-ink)] hover:text-white'
+                        }`}
+                        title="Xem tất cả ảnh (Trình chiếu)"
+                      >
+                        <Maximize2 className="w-3 h-3" />
+                        <span>Xem tất cả</span>
+                      </button>
+                    )}
                   {!isTrash && (
-                    <div className="flex items-center gap-2.5">
+                    <>
                       <button
                         type="button"
                         onClick={() => setShowUrlInput(!showUrlInput)}
@@ -951,8 +1168,9 @@ export default function NoteEditor() {
                           e.target.value = '';
                         }}
                       />
-                    </div>
+                    </>
                   )}
+                  </div>
                 </div>
 
                 {showImagesSection && (
@@ -999,6 +1217,7 @@ export default function NoteEditor() {
                   {activeNote.images.map((imgSrc, idx) => (
                     <div 
                       key={idx}
+                      onClick={() => setLightboxIndex(idx)}
                       className={`group relative aspect-square overflow-hidden border-2 flex items-center justify-center cursor-pointer transition-all duration-300 shadow-[4px_4px_0px_#2C2A29] dark:shadow-[4px_4px_0px_#EBE5D0] ${
                         theme === 'dark' ? 'border-[var(--color-ink-light)] bg-transparent' : 'border-[var(--color-ink)] bg-transparent'
                       }`}
@@ -1014,7 +1233,7 @@ export default function NoteEditor() {
                       <div className={`absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 backdrop-blur-sm ${theme === 'dark' ? 'bg-black/50' : 'bg-[var(--color-paper-dark)]/70'}`}>
                         <button
                           type="button"
-                          onClick={() => setLightboxImage(imgSrc)}
+                          onClick={(e) => { e.stopPropagation(); setLightboxIndex(idx); }}
                           className={`p-1.5 border-2 transition-all cursor-pointer shadow-[2px_2px_0px_#2C2A29] dark:shadow-[2px_2px_0px_#EBE5D0] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none ${
                             theme === 'dark' ? 'bg-[var(--color-ink-light)] border-[var(--color-ink-light)] text-zinc-900' : 'bg-[var(--color-paper)] border-[var(--color-ink)] text-[var(--color-ink)]'
                           }`}
@@ -1023,10 +1242,10 @@ export default function NoteEditor() {
                           <Maximize2 className="w-3.5 h-3.5" />
                         </button>
                         
-                        {!isTrash && (
+                        {!isTrash && activeTab === 'edit' && (
                           <button
                             type="button"
-                            onClick={() => handleDeleteImage(idx)}
+                            onClick={(e) => { e.stopPropagation(); handleDeleteImage(idx); }}
                             className={`p-1.5 border-2 transition-all cursor-pointer shadow-[2px_2px_0px_#2C2A29] dark:shadow-[2px_2px_0px_#EBE5D0] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none ${
                               theme === 'dark' ? 'bg-rose-900 border-[var(--color-ink-light)] text-rose-400' : 'bg-rose-200 border-[var(--color-ink)] text-rose-700'
                             }`}
@@ -1236,7 +1455,7 @@ export default function NoteEditor() {
                   id="editor-body-textarea"
                   ref={editorTextareaRef}
                   placeholder="Bắt đầu viết nội dung (Hỗ trợ Markdown: # H1, **đậm**, *nghiêng*, - list)..."
-                  value={activeNote.content || ''}
+                  value={localContent}
                   onChange={handleContentChange}
                   onKeyDown={(e) => {
                     if ((e.ctrlKey || e.metaKey) && !e.shiftKey) {
@@ -1281,28 +1500,144 @@ export default function NoteEditor() {
         </div>
       </footer>
 
-      {/* Immersive Lightbox Modal Container for full view */}
-      {lightboxImage && (
-        <div 
-          className="fixed inset-0 z-[100] bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4"
-          onClick={() => setLightboxImage(null)}
+      {/* Immersive Gallery Viewer Modal — browse all attached images */}
+      {lightboxIndex !== null && activeNote?.images && activeNote.images.length > 0 && (
+        <div
+          className="fixed inset-0 z-[100] bg-slate-950/90 backdrop-blur-md flex flex-col"
+          onClick={closeLightbox}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Trình chiếu ảnh đính kèm"
         >
-          <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center justify-center">
-            {/* Close trigger button */}
-            <button
-              onClick={() => setLightboxImage(null)}
-              className="absolute -top-12 right-0 p-2.5 rounded-full bg-slate-900/60 hover:bg-slate-800/80 text-white hover:text-rose-400 border border-slate-850/80 transition-all cursor-pointer"
-              title="Đóng chế độ xem"
-            >
-              <X className="w-5 h-5" />
-            </button>
-            <img 
-              src={lightboxImage} 
-              alt="Viewing fullscreen" 
-              className="max-w-full max-h-[80vh] rounded-2xl shadow-2xl border border-slate-850/80 select-none object-contain transition-all duration-300"
-              onClick={(e) => e.stopPropagation()}
-            />
+          {/* Top toolbar */}
+          <div
+            className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 border-b-2 border-slate-700/60"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-[11px] sm:text-xs font-mono font-bold uppercase tracking-wider text-white/90 px-2.5 py-1 border-2 border-white/40 shadow-[2px_2px_0px_rgba(255,255,255,0.25)] shrink-0">
+                {lightboxIndex + 1} / {activeNote.images.length}
+              </span>
+              {activeNote.title && (
+                <span className="hidden sm:block text-xs font-mono text-white/70 truncate max-w-[40vw]">
+                  {activeNote.title}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {activeNote.images.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setIsSlideshowPlaying((p) => !p)}
+                  className="p-2 border-2 border-white/40 text-white/90 hover:bg-white/10 transition-all cursor-pointer shadow-[2px_2px_0px_rgba(255,255,255,0.25)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+                  title={isSlideshowPlaying ? 'Tạm dừng trình chiếu (Space)' : 'Phát trình chiếu tự động (Space)'}
+                >
+                  {isSlideshowPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleDownloadCurrentImage}
+                className="p-2 border-2 border-white/40 text-white/90 hover:bg-white/10 transition-all cursor-pointer shadow-[2px_2px_0px_rgba(255,255,255,0.25)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+                title="Tải ảnh / Mở trong tab mới"
+              >
+                <Download className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={closeLightbox}
+                className="p-2 border-2 border-white/40 text-white/90 hover:bg-rose-500/30 hover:text-rose-200 transition-all cursor-pointer shadow-[2px_2px_0px_rgba(255,255,255,0.25)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+                title="Đóng (Esc)"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
+
+          {/* Main viewer area */}
+          <div className="relative flex-1 flex items-center justify-center px-2 sm:px-4 py-4 min-h-0">
+            {activeNote.images.length > 1 && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); goPrevImage(); }}
+                className="absolute left-2 sm:left-4 top-1/2 -translate-y-1/2 z-10 p-2 sm:p-3 border-2 border-white/50 text-white bg-slate-900/60 hover:bg-slate-800/80 transition-all cursor-pointer shadow-[2px_2px_0px_rgba(255,255,255,0.25)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+                title="Ảnh trước (←)"
+                aria-label="Ảnh trước"
+              >
+                <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" />
+              </button>
+            )}
+
+            <img
+              key={lightboxIndex}
+              src={activeNote.images[lightboxIndex]}
+              alt={`Ảnh ${lightboxIndex + 1} / ${activeNote.images.length}`}
+              className="max-w-full max-h-full object-contain select-none border-2 border-white/30 shadow-[4px_4px_0px_rgba(255,255,255,0.2)] animate-fade-in"
+              referrerPolicy="no-referrer"
+              draggable={false}
+              onClick={(e) => e.stopPropagation()}
+              onTouchStart={(e) => { touchStartXRef.current = e.touches[0]?.clientX ?? null; }}
+              onTouchEnd={(e) => {
+                const start = touchStartXRef.current;
+                touchStartXRef.current = null;
+                if (start === null) return;
+                const end = e.changedTouches[0]?.clientX ?? start;
+                const dx = end - start;
+                if (Math.abs(dx) < 50) return;
+                if (dx < 0) goNextImage();
+                else goPrevImage();
+              }}
+            />
+
+            {activeNote.images.length > 1 && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); goNextImage(); }}
+                className="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 z-10 p-2 sm:p-3 border-2 border-white/50 text-white bg-slate-900/60 hover:bg-slate-800/80 transition-all cursor-pointer shadow-[2px_2px_0px_rgba(255,255,255,0.25)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+                title="Ảnh tiếp theo (→)"
+                aria-label="Ảnh tiếp theo"
+              >
+                <ChevronRight className="w-5 h-5 sm:w-6 sm:h-6" />
+              </button>
+            )}
+          </div>
+
+          {/* Thumbnail strip */}
+          {activeNote.images.length > 1 && (
+            <div
+              ref={thumbnailStripRef}
+              className="border-t-2 border-slate-700/60 px-3 sm:px-6 py-3 overflow-x-auto overflow-y-hidden flex items-center gap-2.5 scrollbar-thin scrollbar-thumb-slate-600"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {activeNote.images.map((src, idx) => (
+                <button
+                  type="button"
+                  key={idx}
+                  data-thumb-idx={idx}
+                  onClick={() => setLightboxIndex(idx)}
+                  className={`relative shrink-0 w-16 h-16 sm:w-20 sm:h-20 overflow-hidden border-2 transition-all cursor-pointer ${
+                    idx === lightboxIndex
+                      ? 'border-amber-300 shadow-[3px_3px_0px_rgba(252,211,77,0.5)] scale-105'
+                      : 'border-white/30 opacity-60 hover:opacity-100 hover:border-white/70'
+                  }`}
+                  title={`Ảnh ${idx + 1}`}
+                  aria-label={`Xem ảnh ${idx + 1}`}
+                  aria-current={idx === lightboxIndex}
+                >
+                  <img
+                    src={src}
+                    alt={`Thumbnail ${idx + 1}`}
+                    className="w-full h-full object-cover pointer-events-none"
+                    referrerPolicy="no-referrer"
+                    draggable={false}
+                  />
+                  <span className="absolute bottom-0 right-0 text-[9px] font-mono font-bold bg-slate-900/80 text-white px-1 leading-tight">
+                    {idx + 1}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
