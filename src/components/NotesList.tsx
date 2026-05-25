@@ -70,6 +70,11 @@ export default function NotesList() {
     });
   };
 
+  // Move note to a different folder
+  const handleMoveToFolder = async (noteId: string, folder: string) => {
+    await updateNote(noteId, { folder });
+  };
+
   // Helper to format timestamps gracefully
   const formatTime = (isoString: any) => {
     if (!isoString) return '';
@@ -469,7 +474,39 @@ export default function NotesList() {
                         </div>
                       )}
 
-                      <div className="flex items-center justify-between pt-1 select-none">
+                      {/* Quick Move to Folder Buttons */}
+                      <div className="flex items-center gap-1.5 mt-3 pt-3 border-t border-slate-200/30 dark:border-slate-800/40 select-none">
+                        {[
+                          { value: 'personal', label: 'Cá nhân' },
+                          { value: 'work', label: 'Công việc' },
+                          { value: 'ideas', label: 'Ý tưởng' }
+                        ].map((folder) => {
+                          const isCurrentFolder = note.folder === folder.value;
+                          return (
+                            <button
+                              key={folder.value}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleMoveToFolder(note.id, folder.value);
+                              }}
+                              className={`text-[9px] font-mono font-bold px-2 py-1 rounded transition-all border ${
+                                isCurrentFolder
+                                  ? (theme === 'dark'
+                                    ? 'bg-blue-600/30 text-blue-300 border-blue-500/50'
+                                    : 'bg-blue-100 text-blue-700 border-blue-400')
+                                  : (theme === 'dark'
+                                    ? 'bg-slate-800/50 text-slate-400 border-slate-700/60 hover:border-slate-600 hover:text-slate-300'
+                                    : 'bg-slate-100/50 text-slate-600 border-slate-300/50 hover:border-slate-400 hover:text-slate-700')
+                              }`}
+                              title={`${isCurrentFolder ? 'Hiện tại: ' : 'Chuyển tới '}${folder.label}`}
+                            >
+                              {folder.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 select-none">
                         <span className="text-[10px] font-mono text-slate-400">
                           {formatTime(note.updatedAt)}
                         </span>
