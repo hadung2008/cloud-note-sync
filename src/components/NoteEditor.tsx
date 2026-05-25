@@ -104,10 +104,17 @@ export default function NoteEditor() {
   const activeNote = notes.find((note) => note.id === activeNoteId);
   const isTrash = activeNote ? activeNote.folder === 'trash' : false;
 
-  // Auto-switch tabs to edit when note changes
+  // Auto-switch tabs: open 'edit' for newly created notes, 'preview' for existing ones
   useEffect(() => {
-    setActiveTab('edit');
-  }, [activeNoteId]);
+    if (!activeNote) return;
+    
+    // Check if note was just created (within last 2 seconds)
+    const createdTime = new Date(activeNote.createdAt).getTime();
+    const now = Date.now();
+    const isNewlyCreated = (now - createdTime) < 2000;
+    
+    setActiveTab(isNewlyCreated ? 'edit' : 'preview');
+  }, [activeNoteId, activeNote]);
 
   // Close lightbox & stop slideshow whenever switching notes
   useEffect(() => {
