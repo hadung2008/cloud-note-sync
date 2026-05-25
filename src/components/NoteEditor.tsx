@@ -79,6 +79,9 @@ export default function NoteEditor() {
   const [localContent, setLocalContent] = useState<string>('');
   const localNoteIdRef = useRef<string | null>(null);
   const contentCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track last edit time to auto-switch to preview after 60s of inactivity
+  const lastEditTimeRef = useRef<number>(Date.now());
+  const inactivityTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Save selection before blur
   const saveSelection = () => {
@@ -105,22 +108,55 @@ export default function NoteEditor() {
   const isTrash = activeNote ? activeNote.folder === 'trash' : false;
 
   // Auto-switch tabs: open 'edit' for newly created notes, 'preview' for existing ones
+  // Only run when activeNoteId changes (switching notes), not on content changes
   useEffect(() => {
-    if (!activeNote) return;
+    const note = notes.find((n) => n.id === activeNoteId);
+    if (!note) return;
     
-    // Check if note was just created (within last 2 seconds)
-    const createdTime = new Date(activeNote.createdAt).getTime();
+    // Reset edit time tracker when switching notes
+    lastEditTimeRef.current = Date.now();
+    
+    // Check if note was just created (within last 60 seconds)
+    const createdTime = new Date(note.createdAt).getTime();
     const now = Date.now();
-    const isNewlyCreated = (now - createdTime) < 2000;
+    const isNewlyCreated = (now - createdTime) < 60000;
     
     setActiveTab(isNewlyCreated ? 'edit' : 'preview');
-  }, [activeNoteId, activeNote]);
+  }, [activeNoteId]);
 
   // Close lightbox & stop slideshow whenever switching notes
   useEffect(() => {
     setLightboxIndex(null);
     setIsSlideshowPlaying(false);
   }, [activeNoteId]);
+
+  // Auto-switch to preview tab after 60 seconds of inactivity (no typing/formatting)
+  useEffect(() => {
+    if (activeTab !== 'edit') return; // Only active when in edit mode
+
+    if (inactivityTimerRef.current) {
+      clearInterval(inactivityTimerRef.current);
+    }
+
+    // Check every second if 60 seconds have passed without any edit
+    inactivityTimerRef.current = setInterval(() => {
+      const timeSinceLastEdit = Date.now() - lastEditTimeRef.current;
+      if (timeSinceLastEdit >= 60000) { // 60 seconds = 60000ms
+        setActiveTab('preview');
+        if (inactivityTimerRef.current) {
+          clearInterval(inactivityTimerRef.current);
+          inactivityTimerRef.current = null;
+        }
+      }
+    }, 1000);
+
+    return () => {
+      if (inactivityTimerRef.current) {
+        clearInterval(inactivityTimerRef.current);
+        inactivityTimerRef.current = null;
+      }
+    };
+  }, [activeTab, activeNoteId]);
 
   // Sync local editor buffer when switching notes. Flush any pending debounced
   // commit from the previous note first so no edits are lost.
@@ -162,6 +198,10 @@ export default function NoteEditor() {
         if (id) {
           updateNote(id, { content: localContent });
         }
+      }
+      if (inactivityTimerRef.current) {
+        clearInterval(inactivityTimerRef.current);
+        inactivityTimerRef.current = null;
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -390,6 +430,8 @@ export default function NoteEditor() {
   // store on a short debounce. This is what makes Ctrl+Z work reliably.
   const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const v = e.target.value;
+    // Track this edit to reset inactivity timer
+    lastEditTimeRef.current = Date.now();
     setLocalContent(v);
     if (contentCommitTimerRef.current) {
       clearTimeout(contentCommitTimerRef.current);
@@ -418,6 +460,9 @@ export default function NoteEditor() {
     if (!activeNote || isTrash) return;
     const ta = editorTextareaRef.current;
     if (!ta) return;
+
+    // Track this formatting action to reset inactivity timer
+    lastEditTimeRef.current = Date.now();
 
     const mode = options.mode || 'wrap';
     const placeholder = options.placeholder || 'văn bản';
