@@ -105,6 +105,37 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // Cache helpers for logged-in users (Network-first strategy: online → cache → offline)
+  const getNotesCache = (): Note[] => {
+    const raw = localStorage.getItem('syncnote_notes_cache');
+    if (!raw) return [];
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  };
+
+  const saveNotesCache = (notesData: Note[]) => {
+    localStorage.setItem('syncnote_notes_cache', JSON.stringify(notesData));
+  };
+
+  // Track online/offline status
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   // Test Cloud Firestore Connection once initially as required by skill guidelines
   useEffect(() => {
     if (isFirebaseConfigured && db) {
@@ -174,11 +205,25 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
         });
 
         setNotes(cloudNotes);
+        // 💾 Cache notes for offline access
+        saveNotesCache(cloudNotes);
         setSyncStatus('synced');
         setLoading(false);
       },
       (error) => {
-        setSyncStatus('error');
+        // 🔄 Network-first strategy: Fall back to cache if error
+        const cached = getNotesCache();
+        if (cached.length > 0 && !isOnline) {
+          setNotes(cached);
+          setSyncStatus('offline');
+          console.log('[Offline] Loaded notes from cache');
+        } else if (cached.length > 0) {
+          setNotes(cached);
+          setSyncStatus('error');
+          console.log('[Error] Using cached notes as fallback');
+        } else {
+          setSyncStatus('error');
+        }
         setLoading(false);
         try {
           handleFirestoreError(error, OperationType.LIST, 'notes');
@@ -269,9 +314,15 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
           createdAt: nowStr,
           updatedAt: nowStr
         });
+        // 💾 Cache new note
+        const cached = getNotesCache();
+        saveNotesCache([newNote, ...cached]);
         setSyncStatus('synced');
       } catch (error) {
-        setSyncStatus('error');
+        // 💾 Cache locally even if Firebase fails
+        const cached = getNotesCache();
+        saveNotesCache([newNote, ...cached]);
+        setSyncStatus(isOnline ? 'error' : 'offline');
         handleFirestoreError(error, OperationType.CREATE, `notes/${noteId}`);
       }
     } else {
@@ -298,9 +349,15 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
           updatedAt: nowStr
         };
         await setDoc(noteRef, fullUpdates, { merge: true });
+        // 💾 Update cache after successful update
+        const updated = notes.map(n => n.id === id ? { ...n, ...updates, updatedAt: nowStr } : n);
+        saveNotesCache(updated);
         setSyncStatus('synced');
       } catch (error) {
-        setSyncStatus('error');
+        // 💾 Update cache locally even if Firebase fails (for offline edit)
+        const updated = notes.map(n => n.id === id ? { ...n, ...updates, updatedAt: nowStr } : n);
+        saveNotesCache(updated);
+        setSyncStatus(isOnline ? 'error' : 'offline');
         handleFirestoreError(error, OperationType.UPDATE, `notes/${id}`);
       }
     } else {
@@ -327,9 +384,15 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
       try {
         const noteRef = doc(db, 'notes', id);
         await deleteDoc(noteRef);
+        // 💾 Update cache after deletion
+        const cached = getNotesCache();
+        saveNotesCache(cached.filter(n => n.id !== id));
         setSyncStatus('synced');
       } catch (error) {
-        setSyncStatus('error');
+        // 💾 Update cache locally even if deletion fails
+        const cached = getNotesCache();
+        saveNotesCache(cached.filter(n => n.id !== id));
+        setSyncStatus(isOnline ? 'error' : 'offline');
         handleFirestoreError(error, OperationType.DELETE, `notes/${id}`);
       }
     } else {
