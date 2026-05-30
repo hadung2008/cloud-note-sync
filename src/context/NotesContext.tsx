@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { 
   collection, 
   doc, 
@@ -105,6 +105,81 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // Cache helpers for logged-in users (Network-first strategy: online → cache → offline)
+  const getNotesCache = (): Note[] => {
+    const raw = localStorage.getItem('syncnote_notes_cache');
+    if (!raw) return [];
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  };
+
+  const saveNotesCache = (notesData: Note[]) => {
+    localStorage.setItem('syncnote_notes_cache', JSON.stringify(notesData));
+  };
+
+  // Pending sync queue: stores offline mutations waiting to be flushed to Firebase
+  type PendingOp =
+    | { type: 'upsert'; id: string; data: Partial<Note> & { userId: string } }
+    | { type: 'delete'; id: string };
+
+  const getPendingQueue = (): PendingOp[] => {
+    const raw = localStorage.getItem('syncnote_pending_queue');
+    if (!raw) return [];
+    try { return JSON.parse(raw); } catch { return []; }
+  };
+
+  const savePendingQueue = (queue: PendingOp[]) => {
+    localStorage.setItem('syncnote_pending_queue', JSON.stringify(queue));
+  };
+
+  const enqueuePending = (op: PendingOp) => {
+    const queue = getPendingQueue();
+    // Collapse duplicate upserts/deletes for the same note id (last-write-wins per id)
+    if (op.type === 'upsert') {
+      const idx = queue.findIndex(q => q.id === op.id);
+      if (idx >= 0 && queue[idx].type === 'upsert') {
+        queue[idx] = { type: 'upsert', id: op.id, data: { ...(queue[idx] as any).data, ...op.data } };
+      } else if (idx >= 0) {
+        queue[idx] = op; // delete -> upsert override
+      } else {
+        queue.push(op);
+      }
+    } else {
+      // delete supersedes prior upserts of same id
+      const filtered = queue.filter(q => q.id !== op.id);
+      filtered.push(op);
+      savePendingQueue(filtered);
+      return;
+    }
+    savePendingQueue(queue);
+  };
+
+  // Track online/offline status
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  // Ref mirrors latest notes for use inside event listeners without re-binding
+  const notesRef = useRef<Note[]>([]);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Keep notesRef in sync
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
+
   // Test Cloud Firestore Connection once initially as required by skill guidelines
   useEffect(() => {
     if (isFirebaseConfigured && db) {
@@ -152,8 +227,16 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!user || !db) return;
 
-    setLoading(true);
-    setSyncStatus('syncing');
+    // 🚀 Preload cache IMMEDIATELY so UI works offline / before first network response
+    const cached = getNotesCache();
+    if (cached.length > 0) {
+      setNotes(cached);
+      setLoading(false);
+      setSyncStatus(navigator.onLine ? 'syncing' : 'offline');
+    } else {
+      setLoading(true);
+      setSyncStatus('syncing');
+    }
 
     const notesCollection = collection(db, 'notes');
     const userNotesQuery = query(
@@ -173,12 +256,42 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
           } as Note);
         });
 
-        setNotes(cloudNotes);
-        setSyncStatus('synced');
+        // 🔀 Merge cloud snapshot with pending offline changes to prevent data loss
+        const pending = getPendingQueue();
+        let merged = cloudNotes;
+        if (pending.length > 0) {
+          const map = new Map(cloudNotes.map(n => [n.id, n]));
+          for (const op of pending) {
+            if (op.type === 'delete') {
+              map.delete(op.id);
+            } else {
+              const existing = map.get(op.id);
+              map.set(op.id, { ...(existing || {} as Note), ...op.data, id: op.id } as Note);
+            }
+          }
+          merged = Array.from(map.values());
+        }
+
+        setNotes(merged);
+        // 💾 Cache merged view (cloud + pending overrides) for offline access
+        saveNotesCache(merged);
+        setSyncStatus(pending.length > 0 ? 'syncing' : 'synced');
         setLoading(false);
       },
       (error) => {
-        setSyncStatus('error');
+        // 🔄 Network-first strategy: Fall back to cache if error
+        const cached = getNotesCache();
+        if (cached.length > 0 && !navigator.onLine) {
+          setNotes(cached);
+          setSyncStatus('offline');
+          console.log('[Offline] Loaded notes from cache');
+        } else if (cached.length > 0) {
+          setNotes(cached);
+          setSyncStatus('error');
+          console.log('[Error] Using cached notes as fallback');
+        } else {
+          setSyncStatus('error');
+        }
         setLoading(false);
         // Fallback: Nếu fetch Firestore thất bại (có thể do offline), lấy notes từ localStorage
         setNotes(getLocalNotes());
@@ -211,6 +324,41 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
       window.removeEventListener('offline', handleOffline);
     };
   }, [user]);
+
+  // 🔁 Flush pending queue to Firebase
+  const flushPendingQueue = async () => {
+    if (!user || !db) return;
+    const queue = getPendingQueue();
+    if (queue.length === 0) return;
+
+    setSyncStatus('syncing');
+    const remaining: PendingOp[] = [];
+    for (const op of queue) {
+      try {
+        if (op.type === 'delete') {
+          await deleteDoc(doc(db, 'notes', op.id));
+        } else {
+          await setDoc(doc(db, 'notes', op.id), op.data, { merge: true });
+        }
+      } catch (err) {
+        console.warn('[Sync] Failed to flush op, keeping in queue', op, err);
+        remaining.push(op);
+      }
+    }
+    savePendingQueue(remaining);
+    if (remaining.length === 0) {
+      setSyncStatus('synced');
+    } else {
+      setSyncStatus(navigator.onLine ? 'error' : 'offline');
+    }
+  };
+
+  // Auto-flush when connection restored
+  useEffect(() => {
+    if (isOnline && user && db) {
+      flushPendingQueue();
+    }
+  }, [isOnline, user]);
 
   // Merge local notes into active cloud storage upon signing in
   const syncGuestToCloud = async (userId: string) => {
@@ -275,25 +423,38 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
     };
 
     if (user && db) {
-      setSyncStatus('syncing');
-      try {
-        const noteRef = doc(db, 'notes', noteId);
-        await setDoc(noteRef, {
-          title: newNote.title,
-          content: newNote.content,
-          folder: newNote.folder,
-          tags: newNote.tags,
-          isPinned: newNote.isPinned,
-          isFavorite: newNote.isFavorite,
-          color: newNote.color,
-          userId: newNote.userId,
-          createdAt: nowStr,
-          updatedAt: nowStr
-        });
-        setSyncStatus('synced');
-      } catch (error) {
-        setSyncStatus('error');
-        handleFirestoreError(error, OperationType.CREATE, `notes/${noteId}`);
+      // 🚀 Optimistic UI: update state + cache BEFORE network call
+      const optimistic = [newNote, ...notesRef.current];
+      setNotes(optimistic);
+      saveNotesCache(optimistic);
+
+      const payload = {
+        title: newNote.title,
+        content: newNote.content,
+        folder: newNote.folder,
+        tags: newNote.tags,
+        isPinned: newNote.isPinned,
+        isFavorite: newNote.isFavorite,
+        color: newNote.color,
+        userId: newNote.userId,
+        createdAt: nowStr,
+        updatedAt: nowStr
+      };
+
+      if (!navigator.onLine) {
+        // Offline: queue for later sync (Firebase SDK without persistence would silently buffer)
+        enqueuePending({ type: 'upsert', id: noteId, data: { ...payload, userId: user.uid } });
+        setSyncStatus('offline');
+      } else {
+        setSyncStatus('syncing');
+        try {
+          await setDoc(doc(db, 'notes', noteId), payload);
+          setSyncStatus('synced');
+        } catch (error) {
+          enqueuePending({ type: 'upsert', id: noteId, data: { ...payload, userId: user.uid } });
+          setSyncStatus(navigator.onLine ? 'error' : 'offline');
+          handleFirestoreError(error, OperationType.CREATE, `notes/${noteId}`);
+        }
       }
     } else {
       // Offline fallback
@@ -308,21 +469,30 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
   // 2. Update Note Fields
   const updateNote = async (id: string, updates: Partial<Note>): Promise<void> => {
     const nowStr = new Date().toISOString();
-    
+
     if (user && db) {
-      setSyncStatus('syncing');
-      try {
-        const noteRef = doc(db, 'notes', id);
-        // Include default fields combined with updates
-        const fullUpdates = {
-          ...updates,
-          updatedAt: nowStr
-        };
-        await setDoc(noteRef, fullUpdates, { merge: true });
-        setSyncStatus('synced');
-      } catch (error) {
-        setSyncStatus('error');
-        handleFirestoreError(error, OperationType.UPDATE, `notes/${id}`);
+      // 🚀 Optimistic UI: update state + cache BEFORE network call
+      const optimistic = notesRef.current.map(n =>
+        n.id === id ? { ...n, ...updates, updatedAt: nowStr } : n
+      );
+      setNotes(optimistic);
+      saveNotesCache(optimistic);
+
+      const fullUpdates = { ...updates, updatedAt: nowStr };
+
+      if (!navigator.onLine) {
+        enqueuePending({ type: 'upsert', id, data: { ...fullUpdates, userId: user.uid } });
+        setSyncStatus('offline');
+      } else {
+        setSyncStatus('syncing');
+        try {
+          await setDoc(doc(db, 'notes', id), fullUpdates, { merge: true });
+          setSyncStatus('synced');
+        } catch (error) {
+          enqueuePending({ type: 'upsert', id, data: { ...fullUpdates, userId: user.uid } });
+          setSyncStatus(navigator.onLine ? 'error' : 'offline');
+          handleFirestoreError(error, OperationType.UPDATE, `notes/${id}`);
+        }
       }
     } else {
       // Local fallback
@@ -344,14 +514,24 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
   // 3. Delete Note
   const deleteNote = async (id: string): Promise<void> => {
     if (user && db) {
-      setSyncStatus('syncing');
-      try {
-        const noteRef = doc(db, 'notes', id);
-        await deleteDoc(noteRef);
-        setSyncStatus('synced');
-      } catch (error) {
-        setSyncStatus('error');
-        handleFirestoreError(error, OperationType.DELETE, `notes/${id}`);
+      // 🚀 Optimistic UI: remove from state + cache BEFORE network call
+      const optimistic = notesRef.current.filter(n => n.id !== id);
+      setNotes(optimistic);
+      saveNotesCache(optimistic);
+
+      if (!navigator.onLine) {
+        enqueuePending({ type: 'delete', id });
+        setSyncStatus('offline');
+      } else {
+        setSyncStatus('syncing');
+        try {
+          await deleteDoc(doc(db, 'notes', id));
+          setSyncStatus('synced');
+        } catch (error) {
+          enqueuePending({ type: 'delete', id });
+          setSyncStatus(navigator.onLine ? 'error' : 'offline');
+          handleFirestoreError(error, OperationType.DELETE, `notes/${id}`);
+        }
       }
     } else {
       // Local Storage delete
