@@ -180,6 +180,8 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
       (error) => {
         setSyncStatus('error');
         setLoading(false);
+        // Fallback: Nếu fetch Firestore thất bại (có thể do offline), lấy notes từ localStorage
+        setNotes(getLocalNotes());
         try {
           handleFirestoreError(error, OperationType.LIST, 'notes');
         } catch (err) {
@@ -189,6 +191,25 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
     );
 
     return () => unsubscribeNotes();
+  }, [user]);
+  // Lắng nghe trạng thái online/offline để tự động cập nhật notes
+  useEffect(() => {
+    const handleOnline = () => {
+      // Khi online trở lại, nếu đã đăng nhập thì sẽ tự động sync qua onSnapshot
+      setSyncStatus(user ? 'syncing' : 'local-only');
+      setLoading(true);
+    };
+    const handleOffline = () => {
+      setSyncStatus('offline');
+      // Khi offline, luôn hiển thị notes local
+      setNotes(getLocalNotes());
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, [user]);
 
   // Merge local notes into active cloud storage upon signing in
