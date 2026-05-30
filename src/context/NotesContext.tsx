@@ -290,11 +290,18 @@ export function NotesProvider({ children }: { children: React.ReactNode }) {
           setSyncStatus('error');
           console.log('[Error] Using cached notes as fallback');
         } else {
-          setSyncStatus('error');
+          // Nếu cache rỗng, fallback sang local_sync_notes (dù đã đăng nhập)
+          const localNotes = getLocalNotes();
+          if (localNotes.length > 0) {
+            setNotes(localNotes);
+            setSyncStatus('offline');
+            console.log('[Offline] Loaded notes from local_sync_notes');
+          } else {
+            setNotes([]);
+            setSyncStatus('error');
+          }
         }
         setLoading(false);
-        // Fallback: Nếu fetch Firestore thất bại (có thể do offline), lấy notes từ localStorage
-        setNotes(getLocalNotes());
         try {
           handleFirestoreError(error, OperationType.LIST, 'notes');
         } catch (err) {
